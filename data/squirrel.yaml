@@ -24,6 +24,12 @@ show_notifications_when: appropriate
 status_icon:
   show: true
 
+# Insert spaces between Han characters and ASCII English letters on commit.
+auto_cjk_latin_spacing: false
+# Control spacing between Han characters and digits or units (%‰°℉′″℃).
+# Omit this setting to inherit auto_cjk_latin_spacing, as in older configurations.
+#auto_cjk_digit_spacing: false
+
 style:
   color_scheme: native
   # Optional: define both light and dark color schemes to match system appearance

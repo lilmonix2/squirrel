@@ -31,6 +31,7 @@ final class SquirrelInputController: IMKInputController {
   private var chordTimer: Timer?
   private var chordDuration: TimeInterval = 0
   private var currentApp: String = ""
+  private let spacingContext = SquirrelSpacingContext()
 
   // swiftlint:disable:next cyclomatic_complexity
   override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
@@ -40,8 +41,12 @@ final class SquirrelInputController: IMKInputController {
 
     // Return true to consume the key event; return false to pass it to the client app.
     var handled = false
+    var forwardedSpacingDigit = false
+    spacingContext.beginKeyDown(event)
+    defer { spacingContext.endKeyDown(event, handled: handled || forwardedSpacingDigit) }
 
     if session == 0 || !rimeAPI.find_session(session) {
+      spacingContext.reset()
       createSession()
       if session == 0 {
         return false
@@ -51,6 +56,7 @@ final class SquirrelInputController: IMKInputController {
     self.client ?= sender as? IMKTextInput
     if let app = client?.bundleIdentifier(), currentApp != app {
       currentApp = app
+      spacingContext.reset()
       updateAppOptions()
     }
 
@@ -135,6 +141,19 @@ final class SquirrelInputController: IMKInputController {
             firstScrollPage = nil
           }
           rimeUpdate()
+          if !handled, rimeModifiers & ~(kLockMask.rawValue | kShiftMask.rawValue) == 0,
+             preedit.isEmpty, let literal = event.characters, literal.count == 1, let digit = literal.first,
+             let client = self.client {
+            let spacing = autoSpacing
+            if spacing.handlesDigit(digit) {
+              if let text = spacingContext.formatForwardedDigit(digit, spacing: spacing, client: client) {
+                insertCommittedText(text, client: client)
+                handled = true
+              } else {
+                forwardedSpacingDigit = true
+              }
+            }
+          }
         }
       }
 
@@ -232,6 +251,7 @@ final class SquirrelInputController: IMKInputController {
   }
 
   override func activateServer(_ sender: Any!) {
+    spacingContext.reset()
     self.client ?= sender as? IMKTextInput
     var keyboardLayout = NSApp.squirrelAppDelegate.config?.getString("keyboard_layout") ?? ""
     if keyboardLayout == "last" || keyboardLayout == "" {
@@ -288,6 +308,7 @@ final class SquirrelInputController: IMKInputController {
   override func deactivateServer(_ sender: Any!) {
     hidePalettes()
     commitComposition(sender)
+    spacingContext.deactivate()
     client = nil
   }
 
@@ -507,7 +528,7 @@ private extension SquirrelInputController {
     var commitText = RimeCommit.rimeStructInit()
     if rimeAPI.get_commit(session, &commitText) {
       if let text = commitText.text {
-        commit(string: String(cString: text))
+        commit(string: String(cString: text), applyingAutoSpacing: true)
       }
       _ = rimeAPI.free_commit(&commitText)
     }
@@ -662,28 +683,44 @@ private extension SquirrelInputController {
     return (candidates, comments)
   }
 
-  func commit(string: String) {
+  func commit(string: String, applyingAutoSpacing: Bool = false) {
     guard let client = client else { return }
+    let spacing = autoSpacing
+    if applyingAutoSpacing && spacing.enabled {
+      spacingContext.insertCommit(string, spacing: spacing, client: client, preeditLength: preedit.utf16.count) { text, range in
+        insertCommittedText(text, client: client, replacementRange: range)
+      }
+    } else {
+      insertCommittedText(string, client: client)
+      spacingContext.plainCommit()
+    }
+    preedit = ""
+    hidePalettes()
+  }
 
+  private func insertCommittedText(_ text: String, client: IMKTextInput, replacementRange: NSRange = .empty) {
     let forceMarkedText =
       session != 0 &&
       rimeAPI.get_option(session, "force_marked_text_for_direct_commit")
 
-    // Direct commits such as full-width punctuation do not necessarily have an
-    // active marked-text phase. Some NSTextInputClient implementations require
-    // one before accepting insertText.
-    if forceMarkedText && preedit.isEmpty && !string.isEmpty {
-      let markedText = NSMutableAttributedString(string: string)
+    // Direct commits can require a marked-text phase in some clients.
+    if forceMarkedText && preedit.isEmpty && !text.isEmpty {
+      let markedText = NSMutableAttributedString(string: text)
       client.setMarkedText(
         markedText,
         selectionRange: NSRange(location: markedText.length, length: 0),
-        replacementRange: .empty
+        replacementRange: replacementRange
       )
+      client.insertText(text, replacementRange: .empty)
+    } else {
+      client.insertText(text, replacementRange: replacementRange)
     }
+  }
 
-    client.insertText(string, replacementRange: .empty)
-    preedit = ""
-    hidePalettes()
+  private var autoSpacing: SquirrelAutoSpacing {
+    let config = NSApp.squirrelAppDelegate.config
+    let english = config?.getBool("auto_cjk_latin_spacing") == true
+    return SquirrelAutoSpacing(english: english, digits: config?.getBool("auto_cjk_digit_spacing") ?? english)
   }
 
   func show(preedit: String, selRange: NSRange, caretPos: Int) {
@@ -692,6 +729,7 @@ private extension SquirrelInputController {
       return
     }
 
+    spacingContext.updatePreedit(preedit, wasEmpty: self.preedit.isEmpty, client: client, enabled: autoSpacing.enabled)
     self.preedit = preedit
     self.caretPos = caretPos
     self.selRange = selRange
