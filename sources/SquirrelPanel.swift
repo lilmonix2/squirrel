@@ -70,6 +70,9 @@ final class SquirrelPanel: NSPanel {
   var inlineCandidate: Bool {
     view.currentTheme.inlineCandidate
   }
+  var hasVisibleChineseCandidates: Bool {
+    isVisible && hasChineseCandidates
+  }
   var canExpandCandidates: Bool {
     isVisible && scrollColumns == 0 && showsExpandControl
   }

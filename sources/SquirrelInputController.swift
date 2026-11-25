@@ -99,6 +99,15 @@ final class SquirrelInputController: IMKInputController {
     case .keyDown:
       // Let client apps handle Command shortcuts.
       if modifiers.contains(.command) {
+        if modifiers.intersection([.command, .control, .option, .shift, .function]) == .command,
+           SquirrelKeycode.osxKeycodeToRime(keycode: event.keyCode, keychar: nil, shift: false, caps: false) == XK_BackSpace,
+           let panel = NSApp.squirrelAppDelegate.panel, panel.inputController === self, panel.hasVisibleChineseCandidates {
+          handled = processKey(UInt32(XK_BackSpace), modifiers: kSuperMask.rawValue)
+          if handled {
+            firstScrollPage = nil
+            rimeUpdate()
+          }
+        }
         break
       }
 
