@@ -41,9 +41,9 @@ final class SquirrelInputController: IMKInputController {
 
     // Return true to consume the key event; return false to pass it to the client app.
     var handled = false
-    var forwardedSpacingDigit = false
+    var forwardedSpacingLiteral = false
     spacingContext.beginKeyDown(event)
-    defer { spacingContext.endKeyDown(event, handled: handled || forwardedSpacingDigit) }
+    defer { spacingContext.endKeyDown(event, handled: handled || forwardedSpacingLiteral) }
 
     if session == 0 || !rimeAPI.find_session(session) {
       spacingContext.reset()
@@ -142,16 +142,14 @@ final class SquirrelInputController: IMKInputController {
           }
           rimeUpdate()
           if !handled, rimeModifiers & ~(kLockMask.rawValue | kShiftMask.rawValue) == 0,
-             preedit.isEmpty, let literal = event.characters, literal.count == 1, let digit = literal.first,
+             preedit.isEmpty, let literal = event.characters, literal.count == 1, let character = literal.first,
              let client = self.client {
-            let spacing = autoSpacing
-            if spacing.handlesDigit(digit) {
-              if let text = spacingContext.formatForwardedDigit(digit, spacing: spacing, client: client) {
-                insertCommittedText(text, client: client)
-                handled = true
-              } else {
-                forwardedSpacingDigit = true
-              }
+            if let inserted = spacingContext.insertForwardedLiteral(character, spacing: autoSpacing, client: client,
+                                                                  insert: { text, range in
+              insertCommittedText(text, client: client, replacementRange: range)
+            }) {
+              handled = inserted
+              forwardedSpacingLiteral = !inserted
             }
           }
         }

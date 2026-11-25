@@ -43,8 +43,9 @@ struct SquirrelAutoSpacing {
     }
   }
 
-  func handlesDigit(_ character: Character) -> Bool {
-    digits && kind(of: character) == .digit
+  func handlesLiteral(_ character: Character) -> Bool {
+    let characterKind = kind(of: character)
+    return (english && characterKind == .english) || (digits && characterKind == .digit)
   }
 
   private func needsSpace(_ left: Character?, _ right: Character?) -> Bool {
@@ -60,7 +61,7 @@ struct SquirrelAutoSpacing {
   }
 
   func format(_ text: String, before: String?, after: String?, cachedTail: Character?,
-              previousKeyWasDelete: Bool = false, leadingOnly: Bool = false) -> Result {
+              previousKeyWasDelete: Bool = false) -> Result {
     guard enabled, let first = text.first, let last = text.last else { return Result(text: text) }
 
     var result = Result(text: "")
@@ -74,7 +75,7 @@ struct SquirrelAutoSpacing {
     }
 
     let hasContext = before != nil || after != nil
-    if hasContext && (previousKeyWasDelete || (!leadingOnly && after != nil && before?.contains("#") == true)) {
+    if hasContext && (previousKeyWasDelete || (after != nil && before?.contains("#") == true)) {
       return result
     }
 
@@ -82,7 +83,7 @@ struct SquirrelAutoSpacing {
     if needsSpace(left, first) {
       result.text = " " + result.text
     }
-    guard !leadingOnly, let after = after else { return result }
+    guard let after = after else { return result }
 
     if needsSpace(last, after.first) {
       result.text.append(" ")

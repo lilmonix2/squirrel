@@ -13,6 +13,12 @@ final class SquirrelSpacingContext {
     let canUseCachedTail: Bool
   }
 
+  private struct CaretTarget {
+    let pid: pid_t
+    let element: AXUIElement
+    let end: Int
+  }
+
   private enum Fragment {
     case unavailable
     case incomplete
@@ -30,6 +36,7 @@ final class SquirrelSpacingContext {
   }
 
   private var lastCommit: (tail: Character, end: Int?)?
+  private var insertedSuffix: (tail: Character, end: Int)?
   private var composition: (start: Int, neighbors: Neighbors)?
   private var mouseMonitor: Any?
   private var lastKeyWasDelete = false
@@ -44,6 +51,7 @@ final class SquirrelSpacingContext {
 
   func reset() {
     lastCommit = nil
+    insertedSuffix = nil
     composition = nil
     lastKeyWasDelete = false
     skipBoundaries = false
@@ -64,6 +72,7 @@ final class SquirrelSpacingContext {
     skipBoundaries = lastKeyWasDelete
     if isDelete(event) {
       lastCommit = nil
+      insertedSuffix = nil
     }
   }
 
@@ -79,6 +88,7 @@ final class SquirrelSpacingContext {
     if preedit.isEmpty {
       composition = nil
     } else if wasEmpty && enabled {
+      insertedSuffix = nil
       // Capture committed neighbors before the host inserts marked text.
       let selection = client.selectedRange()
       if isValid(selection) {
@@ -87,42 +97,72 @@ final class SquirrelSpacingContext {
     }
   }
 
+  @discardableResult
   func insertCommit(_ text: String, spacing: SquirrelAutoSpacing, client: IMKTextInput, preeditLength: Int,
-                    insert: (String, NSRange) -> Void) {
+                    forwardingUnchanged: Bool = false, insert: (String, NSRange) -> Void) -> Bool {
     let position = commitPosition(in: client, preeditLength: preeditLength)
-    let live = readNeighbors(in: client, start: position.start, end: position.replacement?.upperBound)
-    let result = format(text, spacing: spacing, position: position, live: live)
+    var live = readNeighbors(in: client, start: position.start, end: position.replacement?.upperBound)
+    var start = position.start
     var range = NSRange.empty
+    var canReplace: Bool {
+      position.replacement != nil && client.supportsProperty(TSMDocumentPropertyTag(kTSMDocumentSupportDocumentAccessPropertyTag))
+    }
+    // A following literal can replace our own trailing space if the caret stayed after it.
+    if forwardingUnchanged, !skipBoundaries, let suffix = insertedSuffix, let selection = position.replacement,
+       selection.location == suffix.end, selection.length == 0, let before = live.before.text,
+       before.hasSuffix(String(suffix.tail) + " "), live.after.text != nil, canReplace {
+      range = NSRange(location: selection.location - 1, length: 1)
+      start = range.location
+      live.before = .available(String(before.dropLast()))
+    }
+    insertedSuffix = nil
+
+    var result = format(text, spacing: spacing, position: position, live: live)
+    let caretTarget = result.caretAction == .moveLeft
+      ? prepareCaretTarget(client: client, start: start, text: result.text) : nil
+    let canContinueBeforeSuffix = result.caretAction == .moveLeft && canReplace
+    if forwardingUnchanged, result.caretAction == .moveLeft, caretTarget == nil, !canContinueBeforeSuffix {
+      // Preserve continuous literal input when the editor offers neither caret movement nor replacement.
+      result.text.removeLast()
+      result.caretAction = .none
+    }
     // Delete only a space whose live context was verified.
-    if result.caretAction == .deleteRightSpace, let replacement = position.replacement,
-       live.after.text?.first == " ", replacement.upperBound < NSNotFound - 1,
-       client.supportsProperty(TSMDocumentPropertyTag(kTSMDocumentSupportDocumentAccessPropertyTag)) {
+    if !forwardingUnchanged, result.caretAction == .deleteRightSpace, let replacement = position.replacement,
+       live.after.text?.first == " ", replacement.upperBound < NSNotFound - 1, canReplace {
       range = NSRange(location: replacement.location, length: replacement.length + 1)
+    }
+    if forwardingUnchanged, result.text == text, range == .empty {
+      rememberCommit(text, at: start)
+      return false
     }
 
     caretGeneration &+= 1
     insert(result.text, range)
-    rememberCommit(result.text, at: position.start)
-    composition = nil
-    if result.caretAction == .moveLeft, let start = position.start {
-      moveCaretBeforeSuffix(client: client, start: start, text: result.text)
+    rememberCommit(result.text, at: start)
+    if canContinueBeforeSuffix, let end = lastCommit?.end, let tail = result.text.dropLast().last {
+      insertedSuffix = (tail, end)
     }
+    composition = nil
+    if let caretTarget = caretTarget {
+      moveCaretBeforeSuffix(client: client, target: caretTarget, text: result.text)
+    }
+    return true
   }
 
   func plainCommit() {
     lastCommit = nil
+    insertedSuffix = nil
     composition = nil
     caretGeneration &+= 1
   }
 
-  func formatForwardedDigit(_ digit: Character, spacing: SquirrelAutoSpacing, client: IMKTextInput) -> String? {
-    let text = String(digit)
-    let position = commitPosition(in: client, preeditLength: 0)
-    let live = readNeighbors(in: client, start: position.start, end: nil)
-    // Leave the caret after the literal so more digits can follow.
-    let result = format(text, spacing: spacing, position: position, live: live, leadingOnly: true)
-    rememberCommit(result.text, at: position.start)
-    return result.text == text ? nil : result.text
+  func insertForwardedLiteral(_ character: Character, spacing: SquirrelAutoSpacing, client: IMKTextInput,
+                              insert: (String, NSRange) -> Void) -> Bool? {
+    let continuesNumber = spacing.digits && (character == "." || character == ",") &&
+      insertedSuffix?.tail.asciiValue.map { (48...57).contains($0) } == true
+    guard spacing.handlesLiteral(character) || continuesNumber else { return nil }
+    return insertCommit(String(character), spacing: spacing, client: client, preeditLength: 0,
+                        forwardingUnchanged: true, insert: insert)
   }
 }
 
@@ -148,8 +188,8 @@ extension SquirrelSpacingContext {
     return CommitPosition(start: start, replacement: hasValidEnd ? range : nil, canUseCachedTail: canUseCachedTail)
   }
 
-  private func format(_ text: String, spacing: SquirrelAutoSpacing, position: CommitPosition, live: Neighbors,
-              leadingOnly: Bool = false) -> SquirrelAutoSpacing.Result {
+  private func format(_ text: String, spacing: SquirrelAutoSpacing, position: CommitPosition,
+                      live: Neighbors) -> SquirrelAutoSpacing.Result {
     var before = live.before.text ?? composition?.neighbors.before.text
     if before == nil, case .incomplete = live.before {
       // A known fragment is different from an unavailable context. Do not
@@ -161,9 +201,9 @@ extension SquirrelSpacingContext {
     }
     let cachedTail = position.canUseCachedTail && position.start != 0 && (position.start == nil || position.start == lastCommit?.end)
       ? lastCommit?.tail : nil
-    let after = leadingOnly ? nil : live.after.text ?? composition?.neighbors.after.text
+    let after = live.after.text ?? composition?.neighbors.after.text
     return spacing.format(text, before: before, after: after, cachedTail: cachedTail,
-                          previousKeyWasDelete: skipBoundaries, leadingOnly: leadingOnly)
+                          previousKeyWasDelete: skipBoundaries)
   }
 
   private func rememberCommit(_ text: String, at start: Int?) {
@@ -230,35 +270,51 @@ extension SquirrelSpacingContext {
     // The outer edge of a UTF-16 slice may be inside a grapheme cluster.
     // Keep only characters whose outer boundary is present in the fragment.
     let complete = before ? text.dropFirst() : text.dropLast()
+    if complete.isEmpty, text.utf16.count == 1, let scalar = text.unicodeScalars.first,
+       (0x4E00...0x9FA5).contains(scalar.value) {
+      // Some clients return the neighboring Han character without reporting the document end.
+      return .available(text)
+    }
     return complete.isEmpty ? .incomplete : .available(String(complete))
   }
 
-  private func moveCaretBeforeSuffix(client: IMKTextInput, start: Int, text: String) {
+  private func prepareCaretTarget(client: IMKTextInput, start: Int?, text: String) -> CaretTarget? {
     let length = text.utf16.count
-    guard length > 0, start < NSNotFound - length, AXIsProcessTrusted(),
-          let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == client.bundleIdentifier() else { return }
+    guard let start = start, length > 0, start < NSNotFound - length, AXIsProcessTrusted(),
+          let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == client.bundleIdentifier(),
+          let element = focusedTextElement(in: app.processIdentifier) else { return nil }
+    var settable = DarwinBoolean(false)
+    guard AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &settable) == .success,
+          settable.boolValue else { return nil }
+    return CaretTarget(pid: app.processIdentifier, element: element, end: start + length)
+  }
+
+  private func focusedTextElement(in pid: pid_t) -> AXUIElement? {
+    var focused: CFTypeRef?
+    let application = AXUIElementCreateApplication(pid)
+    guard AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+          let focused = focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+    return (focused as! AXUIElement)
+  }
+
+  private func moveCaretBeforeSuffix(client: IMKTextInput, target: CaretTarget, text: String) {
     let generation = caretGeneration
-    let end = start + length
-    let pid = app.processIdentifier
     DispatchQueue.main.async { [weak self, weak client] in
       guard let self = self, client != nil, generation == self.caretGeneration,
-            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-      var focused: CFTypeRef?
-      let application = AXUIElementCreateApplication(pid)
-      guard AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-            let focused = focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return }
-      let element = focused as! AXUIElement
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+            let element = self.focusedTextElement(in: target.pid), CFEqual(element, target.element) else { return }
       let attribute = kAXSelectedTextRangeAttribute as CFString
       var value: CFTypeRef?
       var selection = CFRange()
       guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
             let value = value, CFGetTypeID(value) == AXValueGetTypeID(),
-            AXValueGetValue(value as! AXValue, .cfRange, &selection), selection.location == end, selection.length == 0 else { return }
-      var target = CFRange(location: end - 1, length: 0)
-      if let range = AXValueCreate(.cfRange, &target),
+            AXValueGetValue(value as! AXValue, .cfRange, &selection),
+            selection.location == target.end, selection.length == 0 else { return }
+      var newSelection = CFRange(location: target.end - 1, length: 0)
+      if let range = AXValueCreate(.cfRange, &newSelection),
          AXUIElementSetAttributeValue(element, attribute, range) == .success,
          let tail = text.dropLast().last {
-        self.lastCommit = (tail, end - 1)
+        self.lastCommit = (tail, newSelection.location)
       }
     }
   }
