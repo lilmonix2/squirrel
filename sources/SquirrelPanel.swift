@@ -238,7 +238,8 @@ final class SquirrelPanel: NSPanel {
     }
 
     // candidates
-    let lineSeparator = linear ? "  " : "\n"
+    let horizontalSeparator = scrollColumns == 0 && !vertical ? "    " : "  "
+    let lineSeparator = linear ? horizontalSeparator : "\n"
     let separatorMeasure = NSMutableAttributedString(string: lineSeparator, attributes: theme.attrs)
     if vertical {
       separatorMeasure.addAttribute(.verticalGlyphForm, value: 1, range: NSRange(location: 0, length: separatorMeasure.length))
@@ -358,6 +359,10 @@ private extension SquirrelPanel {
     }
   }
 
+  var trailingCandidatePadding: CGFloat {
+    linear && !vertical ? ceil(view.currentTheme.font.pointSize / 2) : 0
+  }
+
   func maxTextWidth() -> CGFloat {
     let theme = view.currentTheme
     let font: NSFont = theme.font
@@ -366,7 +371,7 @@ private extension SquirrelPanel {
     let maxWidth = if vertical {
       screenRect.height * textWidthRatio - theme.edgeInset.height * 2
     } else {
-      screenRect.width * textWidthRatio - theme.edgeInset.width * 2 - (scrollColumns > 0 ? theme.pagingOffset : 0)
+      screenRect.width * textWidthRatio - theme.edgeInset.width * 2 - trailingCandidatePadding - (scrollColumns > 0 ? theme.pagingOffset : 0)
     }
     return maxWidth
   }
@@ -403,7 +408,7 @@ private extension SquirrelPanel {
       naturalPanelSize.width = contentRect.height + theme.edgeInset.height * 2
       naturalPanelSize.height = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset
     } else {
-      naturalPanelSize.width = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset
+      naturalPanelSize.width = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset + trailingCandidatePadding
       naturalPanelSize.height = contentRect.height + theme.edgeInset.height * 2
     }
 
@@ -437,7 +442,7 @@ private extension SquirrelPanel {
           naturalPanelSize.width = contentRect.height + theme.edgeInset.height * 2
           naturalPanelSize.height = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset
         } else {
-          naturalPanelSize.width = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset
+          naturalPanelSize.width = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset + trailingCandidatePadding
           naturalPanelSize.height = contentRect.height + theme.edgeInset.height * 2
         }
       }
@@ -468,7 +473,7 @@ private extension SquirrelPanel {
           if vertical {
             naturalPanelSize.height = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset
           } else {
-            naturalPanelSize.width = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset
+            naturalPanelSize.width = contentRect.width + theme.edgeInset.width * 2 + view.pagingOffset + trailingCandidatePadding
           }
         }
       }
