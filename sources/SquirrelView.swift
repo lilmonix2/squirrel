@@ -36,11 +36,15 @@ final class SquirrelView: NSView {
   var shape = CAShapeLayer()
   private var downPath: CGPath?
   private var upPath: CGPath?
+  private var showsScrollControls = false
 
   var lightTheme = SquirrelTheme()
   var darkTheme = SquirrelTheme()
   var currentTheme: SquirrelTheme {
     if isDark && darkTheme.available { darkTheme } else { lightTheme }
+  }
+  var pagingOffset: CGFloat {
+    currentTheme.showPaging || showsScrollControls ? currentTheme.pagingOffset : 0
   }
   var textLayoutManager: NSTextLayoutManager {
     textView.textLayoutManager!
@@ -62,6 +66,7 @@ final class SquirrelView: NSView {
     super.init(frame: frameRect)
     textContainer.lineFragmentPadding = 0
     self.wantsLayer = true
+    self.layerContentsRedrawPolicy = .duringViewResize
     self.layer?.masksToBounds = true
   }
   required init?(coder: NSCoder) {
@@ -116,13 +121,15 @@ final class SquirrelView: NSView {
   }
 
   // swiftlint:disable:next function_parameter_count
-  func drawView(candidateRanges: [NSRange], hilightedIndex: Int, preeditRange: NSRange, highlightedPreeditRange: NSRange, canPageUp: Bool, canPageDown: Bool) {
+  func drawView(candidateRanges: [NSRange], hilightedIndex: Int, preeditRange: NSRange, highlightedPreeditRange: NSRange,
+                canPageUp: Bool, canPageDown: Bool, showsScrollControls: Bool = false) {
     self.candidateRanges = candidateRanges
     self.hilightedIndex = hilightedIndex
     self.preeditRange = preeditRange
     self.highlightedPreeditRange = highlightedPreeditRange
     self.canPageUp = canPageUp
     self.canPageDown = canPageDown
+    self.showsScrollControls = showsScrollControls
     self.needsDisplay = true
   }
 
@@ -134,9 +141,10 @@ final class SquirrelView: NSView {
     var highlightedPath: CGMutablePath?
     var highlightedPreeditPath: CGMutablePath?
     let theme = currentTheme
+    let viewBounds = self.bounds
 
-    var containingRect = self.bounds
-    containingRect.size.width -= theme.pagingOffset
+    var containingRect = viewBounds
+    containingRect.size.width -= pagingOffset
     let backgroundRect = containingRect
 
     var preeditRect = NSRect.zero
@@ -212,6 +220,10 @@ final class SquirrelView: NSView {
     NSBezierPath.defaultLineWidth = 0
     backgroundPath = drawSmoothLines(rectVertex(of: backgroundRect), straightCorner: Set(), alpha: 0.3 * theme.cornerRadius, beta: 1.4 * theme.cornerRadius)
 
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    defer { CATransaction.commit() }
+
     self.layer?.sublayers = nil
     let backPath = backgroundPath?.mutableCopy()
     if let path = preeditPath {
@@ -279,9 +291,9 @@ final class SquirrelView: NSView {
       }
       panelLayer.addSublayer(layer)
     }
-    panelLayer.setAffineTransform(CGAffineTransform(translationX: theme.pagingOffset, y: 0))
+    panelLayer.setAffineTransform(CGAffineTransform(translationX: pagingOffset, y: 0))
     let panelPath = CGMutablePath()
-    panelPath.addPath(backgroundPath!, transform: panelLayer.affineTransform().scaledBy(x: 1, y: -1).translatedBy(x: 0, y: -self.bounds.height))
+    panelPath.addPath(backgroundPath!, transform: panelLayer.affineTransform().scaledBy(x: 1, y: -1).translatedBy(x: 0, y: -viewBounds.height))
 
     let (pagingLayer, downPath, upPath) = pagingLayer(theme: theme, preeditRect: preeditRect)
     if let sublayers = pagingLayer.sublayers, !sublayers.isEmpty {
@@ -289,7 +301,7 @@ final class SquirrelView: NSView {
     }
     self.downPath = downPath?.copy()
     self.upPath = upPath?.copy()
-    let flipTransform = CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -self.bounds.height)
+    let flipTransform = CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -viewBounds.height)
     if let downPath {
       panelPath.addPath(downPath, transform: flipTransform)
     }
@@ -311,7 +323,7 @@ final class SquirrelView: NSView {
       return (nil, nil, true)
     }
     if let path = shape.path, path.contains(clickPoint) {
-      var point = NSPoint(x: clickPoint.x - textView.textContainerInset.width - currentTheme.pagingOffset,
+      var point = NSPoint(x: clickPoint.x - textView.textContainerInset.width - pagingOffset,
                           y: clickPoint.y - textView.textContainerInset.height)
       let fragment = textLayoutManager.textLayoutFragment(for: point)
       if let fragment = fragment {
@@ -722,12 +734,12 @@ private extension SquirrelView {
 
   func pagingLayer(theme: SquirrelTheme, preeditRect: CGRect) -> (CAShapeLayer, CGPath?, CGPath?) {
     let layer = CAShapeLayer()
-    guard theme.showPaging && (canPageUp || canPageDown) else { return (layer, nil, nil) }
+    guard pagingOffset > 0 && (canPageUp || canPageDown) else { return (layer, nil, nil) }
     guard let firstCandidate = candidateRanges.first, let range = convert(range: firstCandidate) else { return (layer, nil, nil) }
     var height = contentRect(range: range).height
     let preeditHeight = max(0, preeditRect.height + theme.preeditLinespace / 2 + theme.hilitedCornerRadius / 2 - theme.edgeInset.height) + theme.edgeInset.height - theme.linespace / 2
     height += theme.linespace
-    let radius = min(0.5 * theme.pagingOffset, 2 * height / 9)
+    let radius = min(0.5 * pagingOffset, 2 * height / 9)
     let effectiveRadius = min(theme.cornerRadius, 0.6 * radius)
     guard let trianglePath = drawSmoothLines(
       triangle(center: .zero, radius: radius),
@@ -738,14 +750,14 @@ private extension SquirrelView {
     var downPath: CGPath?
     var upPath: CGPath?
     if canPageDown {
-      var downTransform = CGAffineTransform(translationX: 0.5 * theme.pagingOffset, y: 2 * height / 3 + preeditHeight)
+      var downTransform = CGAffineTransform(translationX: 0.5 * pagingOffset, y: 2 * height / 3 + preeditHeight)
       let downLayer = shapeFromPath(path: trianglePath.copy(using: &downTransform))
       downLayer.fillColor = theme.backgroundColor.cgColor
       downPath = trianglePath.copy(using: &downTransform)
       layer.addSublayer(downLayer)
     }
     if canPageUp {
-      var upTransform = CGAffineTransform(rotationAngle: .pi).translatedBy(x: -0.5 * theme.pagingOffset, y: -height / 3 - preeditHeight)
+      var upTransform = CGAffineTransform(rotationAngle: .pi).translatedBy(x: -0.5 * pagingOffset, y: -height / 3 - preeditHeight)
       let upLayer = shapeFromPath(path: trianglePath.copy(using: &upTransform))
       upLayer.fillColor = theme.backgroundColor.cgColor
       upPath = trianglePath.copy(using: &upTransform)

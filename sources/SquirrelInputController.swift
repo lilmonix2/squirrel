@@ -9,6 +9,7 @@ import InputMethodKit
 
 final class SquirrelInputController: IMKInputController {
   private static let keyRollOver = 50
+  private static let candidateScrollRows = 5
   private static var unknownAppCnt: UInt = 0
 
   private weak var client: IMKTextInput?
@@ -21,6 +22,9 @@ final class SquirrelInputController: IMKInputController {
   private var schemaId: String = ""
   private var inlinePreedit = false
   private var inlineCandidate = false
+  private var candidatePage = 0
+  private var candidatePageSize = 0
+  private var firstScrollPage: Int?
   private var chordKeyCodes: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
   private var chordModifiers: [UInt32] = .init(repeating: 0, count: SquirrelInputController.keyRollOver)
   private var chordKeyCount: Int = 0
@@ -111,7 +115,16 @@ final class SquirrelInputController: IMKInputController {
                                                            caps: modifiers.contains(.capsLock))
         if rimeKeycode != 0 {
           let rimeModifiers = SquirrelKeycode.osxModifiersToRime(modifiers: modifiers)
+          if rimeModifiers & ~kLockMask.rawValue == 0, handleCandidateScrollKey(rimeKeycode) {
+            handled = true
+            return true
+          }
+
+          let scrollInput = firstScrollPage.flatMap { _ in rimeAPI.get_input(session).map { String(cString: $0) } }
           handled = processKey(rimeKeycode, modifiers: rimeModifiers)
+          if let scrollInput, rimeAPI.get_input(session).map({ String(cString: $0) }) != scrollInput {
+            firstScrollPage = nil
+          }
           rimeUpdate()
         }
       }
@@ -123,9 +136,54 @@ final class SquirrelInputController: IMKInputController {
     return handled
   }
 
+  private func handleCandidateScrollKey(_ keycode: UInt32) -> Bool {
+    switch Int32(keycode) {
+    case XK_equal, XK_Down, XK_KP_Down, XK_Page_Down, XK_KP_Page_Down:
+      if firstScrollPage == nil {
+        return expandCandidateList(advance: keycode == XK_equal)
+      }
+      _ = page(up: false)
+      return true
+    case XK_minus, XK_Up, XK_KP_Up, XK_Page_Up, XK_KP_Page_Up:
+      guard firstScrollPage != nil else { return false }
+      if candidatePage == 0 {
+        return collapseCandidateList()
+      }
+      _ = page(up: true)
+      return true
+    case XK_Escape where firstScrollPage != nil:
+      return collapseCandidateList()
+    default:
+      return false
+    }
+  }
+
+  func expandCandidateList(advance: Bool = false) -> Bool {
+    guard firstScrollPage == nil, candidatePageSize > 0,
+          let panel = NSApp.squirrelAppDelegate.panel, panel.inputController === self, panel.canExpandCandidates else { return false }
+    firstScrollPage = candidatePage
+    if advance {
+      _ = rimeAPI.change_page(session, false)
+    }
+    rimeUpdate()
+    return firstScrollPage != nil
+  }
+
+  func collapseCandidateList() -> Bool {
+    guard firstScrollPage != nil else { return false }
+    firstScrollPage = nil
+    rimeUpdate()
+    return true
+  }
+
   func selectCandidate(_ index: Int) -> Bool {
-    let success = rimeAPI.select_candidate_on_current_page(session, index)
+    let success = if let firstScrollPage {
+      rimeAPI.select_candidate(session, firstScrollPage * candidatePageSize + index)
+    } else {
+      rimeAPI.select_candidate_on_current_page(session, index)
+    }
     if success {
+      firstScrollPage = nil
       rimeUpdate()
     }
     return success
@@ -225,6 +283,7 @@ final class SquirrelInputController: IMKInputController {
   }
 
   override func hidePalettes() {
+    firstScrollPage = nil
     NSApp.squirrelAppDelegate.panel?.hide()
     super.hidePalettes()
   }
@@ -367,6 +426,7 @@ private extension SquirrelInputController {
     print("createSession: \(app)")
     currentApp = app
     session = rimeAPI.create_session()
+    firstScrollPage = nil
     schemaId = ""
 
     if session != 0 {
@@ -445,12 +505,14 @@ private extension SquirrelInputController {
   }
 
   // Preserve reserved comment marks when librime requests a UI-only refresh.
+  // swiftlint:disable:next cyclomatic_complexity
   func rimeUpdate(clearReservedComments: Bool = true) {
     if clearReservedComments {
       specialCommentIndices = [:]
     }
     rimeConsumeCommittedText()
 
+    var isChineseComposition = false
     var status = RimeStatus_stdbool.rimeStructInit()
     if rimeAPI.get_status(session, &status) {
       // swiftlint:disable:next identifier_name
@@ -463,6 +525,7 @@ private extension SquirrelInputController {
           rimeAPI.set_option(session, "soft_cursor", !inlinePreedit)
         }
       }
+      isChineseComposition = status.is_composing && !status.is_ascii_mode
       _ = rimeAPI.free_status(&status)
     }
 
@@ -546,17 +609,48 @@ private extension SquirrelInputController {
         }
       }
       // swiftlint:enable identifier_name
-      let page = Int(ctx.menu.page_no)
-      let lastPage = ctx.menu.is_last_page
+      let hasChineseCandidates = isChineseComposition && candidates.contains { $0.contains(/\p{Han}/) }
+      candidatePage = Int(ctx.menu.page_no)
+      candidatePageSize = Int(ctx.menu.page_size)
+      var highlighted = Int(ctx.menu.highlighted_candidate_index)
+      if let firstScrollPage {
+        let firstPage = min(candidatePage, max(firstScrollPage, candidatePage - Self.candidateScrollRows + 1))
+        if isChineseComposition, numCandidates > 0, candidatePageSize > 0,
+           let panel = NSApp.squirrelAppDelegate.panel, panel.linear, !panel.vertical,
+           let scroll = scrollCandidates(from: firstPage * candidatePageSize, limit: Self.candidateScrollRows * candidatePageSize) {
+          self.firstScrollPage = firstPage
+          highlighted += (candidatePage - firstPage) * candidatePageSize
+          candidates = scroll.candidates
+          comments = scroll.comments
+        } else {
+          self.firstScrollPage = nil
+        }
+      }
 
       let selRange = NSRange(location: start.utf16Offset(in: preedit), length: preedit.utf16.distance(from: start, to: end))
       showPanel(preedit: inlinePreedit ? "" : preedit, selRange: selRange, caretPos: caretPos.utf16Offset(in: preedit),
-                candidates: candidates, comments: comments, labels: labels, highlighted: Int(ctx.menu.highlighted_candidate_index),
-                page: page, lastPage: lastPage)
+                candidates: candidates, comments: comments, labels: labels, highlighted: highlighted, page: candidatePage, lastPage: ctx.menu.is_last_page,
+                scrollColumns: firstScrollPage == nil ? 0 : candidatePageSize,
+                hasChineseCandidates: hasChineseCandidates)
       _ = rimeAPI.free_context(&ctx)
     } else {
       hidePalettes()
     }
+  }
+
+  private func scrollCandidates(from start: Int, limit: Int) -> (candidates: [String], comments: [String])? {
+    var iterator = RimeCandidateListIterator()
+    guard rimeAPI.candidate_list_from_index(session, &iterator, Int32(start)) else { return nil }
+    defer { rimeAPI.candidate_list_end(&iterator) }
+
+    var candidates = [String]()
+    var comments = [String]()
+    while candidates.count < limit && rimeAPI.candidate_list_next(&iterator) {
+      candidates.append(iterator.candidate.text.map { String(cString: $0) } ?? "")
+      comments.append(iterator.candidate.comment.map { String(cString: $0) } ?? "")
+    }
+    guard !candidates.isEmpty else { return nil }
+    return (candidates, comments)
   }
 
   func commit(string: String) {
@@ -606,7 +700,8 @@ private extension SquirrelInputController {
   }
 
   // swiftlint:disable:next function_parameter_count
-  func showPanel(preedit: String, selRange: NSRange, caretPos: Int, candidates: [String], comments: [String], labels: [String], highlighted: Int, page: Int, lastPage: Bool) {
+  func showPanel(preedit: String, selRange: NSRange, caretPos: Int, candidates: [String], comments: [String], labels: [String], highlighted: Int,
+                 page: Int, lastPage: Bool, scrollColumns: Int, hasChineseCandidates: Bool) {
     guard let client = client else { return }
     var inputPos = NSRect()
     client.attributes(forCharacterIndex: 0, lineHeightRectangle: &inputPos)
@@ -614,7 +709,8 @@ private extension SquirrelInputController {
       panel.position = inputPos
       panel.inputController = self
       panel.update(preedit: preedit, selRange: selRange, caretPos: caretPos, candidates: candidates, comments: comments, labels: labels,
-                   highlighted: highlighted, page: page, lastPage: lastPage, update: true)
+                   highlighted: highlighted, page: page, lastPage: lastPage, update: true,
+                   scrollColumns: scrollColumns, hasChineseCandidates: hasChineseCandidates)
     }
   }
 

@@ -11,6 +11,7 @@ final class SquirrelTheme {
   static let offsetHeight: CGFloat = 5
   static let defaultFontSize: CGFloat = NSFont.systemFontSize
   static let showStatusDuration: Double = 1.2
+  static let scrollAnimationDuration: TimeInterval = 0.18
   static let defaultFont = NSFont.userFont(ofSize: defaultFontSize)!
 
   enum StatusMessageType: String {
@@ -198,11 +199,7 @@ final class SquirrelTheme {
     }
   }
   var pagingOffset: CGFloat {
-    if showPaging {
-      (labelFontSize ?? fontSize ?? Self.defaultFontSize) * 1.5
-    } else {
-      0
-    }
+    (labelFontSize ?? fontSize ?? Self.defaultFontSize) * 1.5
   }
 
   func load(config: SquirrelConfig, dark: Bool) {
